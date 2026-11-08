@@ -1,0 +1,9 @@
+node_modules
+apps/mobile/android/
+apps/mobile/ios/
+.expo/
+*.log
+*identity*.json
+.playwright-mcp/
+*.apk
+relay-secret
