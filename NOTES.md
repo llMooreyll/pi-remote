@@ -132,3 +132,51 @@
     - 每个文件单独开一条加密连接传输，按确认控制流量，可续传。
     - 电脑 → 手机：由 AI 工具 `send_to_phone` 发起。
     - 手机 → 电脑：由 App 的"附件"或"文件"页发起；作为附件时，在消息末尾附上电脑上的路径。
+64. **M9 双向文件传输已实现**（无人值守完成，2026-11-09）。
+    - **电脑端**：`hostd/src/transfers.ts`（登记、禁止列表、过期清理）、`zip-store.ts`（不压缩的 zip，用 `zlib.crc32`）、`file-lane.ts`（文件通道）、`client-hub.ts`（`purpose:"lane"` 连接、每台设备最多 2 条）、`secure-socket.ts`（二进制帧）。bridge 新增 `send-tool.ts`，只在 TUI 模式的 `session_start` 中注册，每个扩展实例注册一次。dev-client 新增 `transfers`、`get`、`put`、`rtt`。
+    - **手机端**：`net/lane.ts`、`state/transfers.ts`（队列、重试 2/5/15 秒、自动下载）、`session/FileRow.tsx`、`app/files.tsx`、Composer 附件（`lib/attach.ts`）、首页 `files` 入口、设置第 04 节。
+    - **验收**：第 1～12 条通过（dev-client 跑第 1～9 条，Waydroid 跑第 10～12 条）。第 10 条中"旧 hostd 时隐藏界面"只做了静态核对：所有入口都经过 `filesSupported()`，它要求 `auth_ok.features` 含 `files`。
+    - **实测速度**：
+      - 经中继约 0.55 MB/s，瓶颈是 VPS 或家庭上行带宽。
+      - 本机 dev-client 直连约 150 MB/s。
+      - Waydroid 直连下载约 3 MB/s、上传约 3 MB/s，受纯 JS 加解密限制。
+      - 传输期间 Waydroid 掉帧比例 28.8%，空闲时 23.5%，处于 Waydroid 自身的噪声范围内。
+    - **窗口由 2 MiB 改为 256 KiB，块由 256 KiB 改为 64 KiB**：在同一条已建连接上测请求延迟，空闲时约 0.09 秒；传输时窗口 512 KiB 为 0.6～1.9 秒，256 KiB 为 0.45～1.5 秒。吞吐量没有变化。剩余的延迟不随窗口减小而下降，判断来自链路本身（限速丢包或上行排队），应用层无法再降。
+    - **中继**：传 200 MB 期间，VPS 上 pi-relay 的内存从 39.6 MB 到最高 44.7 MB；日志只有连接事件。因此 M9d（中继背压）不做。
+    - **与计划不同的两处**：
+      - expo-file-system 58.0.13 支持对 SAF 文件分块写入，"存到文件夹"不再按大小限制，100 MB 实测正常。
+      - 用 `File.preview` 打开文件，不再需要 `expo-intent-launcher`（已卸载）。
+65. **既有 bug：文字草稿从未写入磁盘**。SecureStore 的键只允许 `[A-Za-z0-9._-]`，`draft:<sessionId>` 中的冒号让写入抛错，而错误被吞掉了，所以第四轮的草稿只在内存中有效，App 重启后丢失。`lib/kv.ts` 现在统一把不允许的字符替换为 `_`，已有的合法键不受影响。Waydroid 实测：文字和附件在 App 被强制停止并重新打开后都能恢复。
+66. **常驻通知停在 "Receiving … 99%"**：`startForeground` 内部先 await 再显示通知，并发调用时旧内容可能覆盖新内容。现在所有显示和停止操作排成一个队列，只显示最新内容；传输结束时强制刷新一次。
+67. **Waydroid 测试经验**：
+    - **构建**：测试构建用 `EXPO_PUBLIC_TEST_HOOKS=1 ./gradlew assembleRelease -PreactNativeArchitectures=x86_64`。gradle 不会因为环境变量变化而重新打包 JS，所以切换测试版和正式版前要删除 `app/build/generated/assets/react` 和 `app/build/intermediates/assets/release`。
+    - **安装**：`adb install` 偶尔会卡住，而且超时后设备端的安装仍在继续，完成时会把 App 结束掉。改用 `adb push … /data/local/tmp/pr.apk` 加 `adb shell pm install -r`。
+    - **启动**：`monkey -p` 偶尔返回 -5，改用 `am start -n dev.moorey.piremote/.MainActivity`。
+    - **dump**：logcat 单行约 4 KB，完整的 dump 会被截断；用 `piremote://test/dump?part=<key>` 只输出一部分。App 重启后的第一次深链接可能早于初始化，此时返回 `null`。
+    - **新测试钩子**：`piremote://test/mkfile?name=&size=|text=`，生成文件并作为下一次"选择文件"的结果，代替系统选择器。
+    - **Waydroid 环境**：没有能打开 txt/pdf 的应用，txt 会弹出 Browser/HTML Viewer，图片会打开相册。SAF 目录选择器可以用 uiautomator 按文字点击操作（Documents → USE THIS FOLDER → ALLOW）。
+68. **/reload 后 send_to_phone 报 `s.conn.call is not a function`**：
+    - **现象**：在 M9 之前启动的 pi 里执行 `/reload` 后，工具已经出现在工具列表中，但调用时报这个错。
+    - **原因**：
+      - pi 的 `/reload` 会清空扩展缓存，并用 `moduleCache:false` 重新导入代码（`dist/core/resource-loader.js:373`、`extensions/loader.js:481`），新代码确实加载了。
+      - 但 bridge 把与 hostd 的连接对象保存在 `globalThis` 上，以便 processId 和事件序号跨 reload 保持不变。这个对象是旧代码创建的实例，没有 `call()` 方法。
+    - **复现方式**：用 `pi -ne -e <旧版 bridge 副本>` 启动，把副本换成新代码后执行 `/reload`。
+    - **修复**（`host-conn.ts` 的 `ensureConnected`）：
+      - 发现 `s.conn` 不是当前代码的 `HostConn` 实例时，新建一个连接，接管旧连接里未发送的事件，用同一个 processId 打招呼。
+      - 收到 welcome 后，直接断开旧 socket，不发 `bye`。
+      - hostd 把这当作重连处理，手机只收到 `changed`，没有 `down`。
+    - **结论**：`globalThis` 上只应保存数据，不应保存带方法的对象。pi 文档（"Long-lived resources and shutdown"）的要求是：资源在 `session_start` 中创建，在 `session_shutdown` 中关闭。bridge 为了保持 processId 和 seq 连续，有意让连接跨 reload 保留，现在补上了"代码换了就换实例"这一步。
+69. **手机上关闭和重启 pi**：
+    - **原有情况**：关闭按钮藏在"About this pi"里，只对 hostd 启动的进程和子代理显示；`/quit` 被标成"只能在电脑上用"；`ctx.shutdown()` 要等当前任务结束才退出。
+    - **现在的入口**：
+      - 命令面板新增"This pi"一组，包含 Restart pi（只对主进程显示）和 Close pi。
+      - 首页进程行长按，弹出 Open / Restart / Close 菜单。
+      - 手机上可以用 `/quit`。
+    - **关闭**：所有进程都能关；正在运行的先 abort 再 shutdown。
+    - **重启**：
+      - 由 hostd 的新 op `restart_process` 完成，即使手机中途断线也不会做到一半。
+      - 退出之前先检查能否重开：会话文件是否存在、是否在 sessions 目录内、cwd 是否存在且在 home 下。检查不通过就报错，旧 pi 保持运行。
+      - 实测发现，pi 要等第一条消息才会写会话文件，没有消息的会话无法重开，现在会明确提示"先关闭"。
+      - 之前有一次测试，cwd 在 /tmp 下，pi 先退出了，重开时才被拒绝。这就是改为先检查后退出的原因。
+    - **实测**：dev-client 对运行中的 pi 重启用时约 3.5 秒，历史完整保留。Waydroid 上长按关闭、命令面板重启（含信任对话框）、`/quit`、命令面板关闭都通过。
+70. **Waydroid 安装卡住的真正原因**：Google Play 保护机制弹出"Send app for a security check?"等待点击（Finsky VerifyApps），安装就挂在那里。处理方式是在安装时用 `wd.mjs taptext "Don't send"` 点掉，不修改系统设置。第 67 条中提到的"adb install 偶尔卡住"也是这个原因。

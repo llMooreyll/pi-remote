@@ -12,6 +12,10 @@ export const TEST_HOOKS = process.env.EXPO_PUBLIC_TEST_HOOKS === "1";
 const setters = new Map<string, (text: string) => void>();
 const actions = new Map<string, () => void>();
 let dumpProvider: (() => unknown) | undefined;
+const commands = new Map<string, (params: URLSearchParams) => void>();
+
+/** Extra piremote://test/<name> commands registered by feature modules (test builds only). */
+export function registerTestCommand(name: string, fn: (params: URLSearchParams) => void): void { if (TEST_HOOKS) commands.set(name, fn); }
 
 export function setDumpProvider(fn: () => unknown): void { dumpProvider = fn; }
 
@@ -62,7 +66,14 @@ export function handleTestUrl(url: string): boolean {
   } else if (m[1] === "labels") {
     testLog("labels", { labels: registeredLabels() });
   } else if (m[1] === "dump") {
-    testLog("dump", { state: dumpProvider?.() ?? null });
+    // logcat cuts lines near 4 KB; ?part=<key> logs one top-level key of the summary.
+    const state = dumpProvider?.() as Record<string, unknown> | null | undefined;
+    const part = params.get("part");
+    testLog("dump", { state: part && state ? { [part]: state[part] ?? null } : state ?? null });
+  } else {
+    const fn = commands.get(m[1]!);
+    testLog(m[1]!, { ok: !!fn });
+    if (fn) { try { fn(params); } catch (e) { testLog(m[1]!, { error: String(e) }); } }
   }
   return true;
 }
